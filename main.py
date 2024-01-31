@@ -1,9 +1,11 @@
-
 import imaplib
 import email as email_lib
 import re
+from io import BytesIO
+
 from pymongo import MongoClient
 from datetime import datetime
+
 
 def fetch_last_email_content(email_address, password):
     """
@@ -42,6 +44,7 @@ def fetch_last_email_content(email_address, password):
     except Exception as e:
         print(f"An error occurred: {e}")
         return None
+
 
 # Example usage
 # email_content = fetch_last_email_content('your_email@gmail.com', 'your_password')
@@ -160,7 +163,6 @@ def parse_email(raw_email_content, email_id):
 # parsed_data = parse_email(raw_email_content)
 
 
-
 def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orders_collection='orders'):
     """
     Inserts the order details into a MongoDB collection, organized by date and route.
@@ -170,7 +172,8 @@ def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orde
     :param orders_collection: The name of the collection for orders.
     """
     # Check if the necessary data is available
-    if not extracted_data.get('Order Details') or not extracted_data.get('Pick up Date') or not extracted_data.get('Route Number'):
+    if not extracted_data.get('Order Details') or not extracted_data.get('Pick up Date') or not extracted_data.get(
+            'Route Number'):
         print("Missing order details, date, or route number.")
         return
 
@@ -195,7 +198,6 @@ def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orde
 # parsed_data = parse_email(raw_email_content)
 # insert_order_into_mongodb(parsed_data)
 def get_last_parsed_email_id(client, db_name='mydatabase', status_collection='status'):
-
     db = client[db_name]
     collection = db[status_collection]
 
@@ -204,6 +206,7 @@ def get_last_parsed_email_id(client, db_name='mydatabase', status_collection='st
     last_parsed_email_id = status_document.get('value') if status_document else None
 
     return last_parsed_email_id
+
 
 def get_latest_email_id(email_address, password):
     # Connect to Gmail's IMAP server
@@ -226,7 +229,9 @@ def get_latest_email_id(email_address, password):
 
     return last_email_id
 
-def check_and_parse_new_email(email_address, email_password, client, db_name='mydatabase', status_collection='status', orders_collection='orders'):
+
+def check_and_parse_new_email(email_address, email_password, client, db_name='mydatabase', status_collection='status',
+                              orders_collection='orders'):
     latest_email_id = get_latest_email_id(email_address, email_password)
     last_parsed_email_id = get_last_parsed_email_id(client, db_name, status_collection)
 
@@ -247,9 +252,76 @@ def check_and_parse_new_email(email_address, email_password, client, db_name='my
         collection.update_one({'variable': 'last_parsed'}, {'$set': {'value': latest_email_id}}, upsert=True)
         client.close()
 
+
 # Example usage
 # check_and_parse_new_email('your_email@gmail.com', 'your_password')
 
+import imaplib
+from tabula import read_pdf
+from io import BytesIO
+
+
+
+def fetch_and_parse_pdf_from_email(email_address, password, mail_server='imap.gmail.com'):
+    mail = imaplib.IMAP4_SSL(mail_server)
+    mail.login(email_address, password)
+    mail.select('inbox')
+
+    status, response = mail.search(None, '(SUBJECT "IS")')
+    if status != 'OK':
+        print("No emails with the specified subject and attachments found.")
+        return
+
+    for e_id in reversed(response[0].split()):
+        status, data = mail.fetch(e_id, '(RFC822)')
+        if status != 'OK':
+            continue
+
+        msg = email_lib.message_from_bytes(data[0][1])
+
+        for part in msg.walk():
+            if part.get_content_maintype() == 'multipart' or part.get('Content-Disposition') is None:
+                continue
+
+            filename = part.get_filename()
+            if filename and filename.endswith('.pdf'):
+                pdf_bytes = part.get_payload(decode=True)
+                print(f"PDF found, parsing in memory...")
+
+                # Use tabula-py to read the PDF from bytes
+                dfs = read_pdf(BytesIO(pdf_bytes), pages='all', multiple_tables=True, stream=True)
+
+                if dfs:
+                    print(f"Found {len(dfs)} tables.")
+                    # Here you can process your data frames (dfs) and save them to MongoDB
+                    # For simplicity, we're just printing the first table
+                    if len(dfs) > 0:
+                        print(dfs[0])
+                        # save_inventory_data_to_mongodb(dfs[0])  # Implement this function based on your needs
+                else:
+                    print("No tables found in the PDF.")
+                break  # Assuming one PDF per email of interest, break after processing
+
+    mail.logout()
+
+
+def save_inventory_data_to_mongodb(df, db_name='mydatabase', collection_name='inventory'):
+    uri = "mongodb+srv://gjtat901:koxbi2-kijbas-qoQzad@cluster0.abxr6po.mongodb.net/?retryWrites=true&w=majority"
+    client = MongoClient(uri)
+    db = client[db_name]
+    collection = db[collection_name]
+
+    # Convert DataFrame to dictionary and insert into MongoDB
+    data_dict = df.to_dict("records")  # Converts DataFrame to list of dictionaries
+    if data_dict:
+        collection.insert_many(data_dict)
+        print(f"Inserted {len(data_dict)} records into MongoDB.")
+    else:
+        print("No data to insert.")
+
+    client.close()
+
+# Example usage
 
 if __name__ == '__main__':
     email = "GJTat901@gmail.com"
@@ -257,6 +329,5 @@ if __name__ == '__main__':
     uri = "mongodb+srv://gjtat901:koxbi2-kijbas-qoQzad@cluster0.abxr6po.mongodb.net/?retryWrites=true&w=majority"
     client = MongoClient(uri)
 
-    check_and_parse_new_email(email, password, client)
-
-
+    fetch_and_parse_pdf_from_email(email, password)
+    # check_and_parse_new_email(email, password, client)
