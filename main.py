@@ -1,8 +1,6 @@
 import imaplib
 import email as email_lib
 import re
-from io import BytesIO
-
 from pymongo import MongoClient
 from datetime import datetime
 
@@ -61,6 +59,7 @@ def parse_email(raw_email_content, email_id):
         return None
 
     email_message = email_lib.message_from_bytes(raw_email_content)
+    email_id = email_message.get('Message-ID')  # Get the email's unique ID
 
     # Define a dictionary to hold the extracted data
     extracted_data = {
@@ -72,6 +71,7 @@ def parse_email(raw_email_content, email_id):
         'Order Details': [],
         'Email ID': email_id
     }
+
 
     def decode_payload(payload, charset='utf-8'):
         try:
@@ -200,128 +200,76 @@ def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orde
 def get_last_parsed_email_id(client, db_name='mydatabase', status_collection='status'):
     db = client[db_name]
     collection = db[status_collection]
-
-    # Assuming there's a document with a field 'last_parsed'
     status_document = collection.find_one({'variable': 'last_parsed'})
     last_parsed_email_id = status_document.get('value') if status_document else None
-
     return last_parsed_email_id
 
-
 def get_latest_email_id(email_address, password):
-    # Connect to Gmail's IMAP server
     mail = imaplib.IMAP4_SSL('imap.gmail.com')
     mail.login(email_address, password)
     mail.select('inbox')
-
-    # Search for all emails in the inbox
     status, email_ids = mail.search(None, 'ALL')
     if status != 'OK':
         print("No emails found!")
         return None
-
-    # Get the last email ID
     last_email_id = email_ids[0].split()[-1].decode()
-
-    # Close the connection and logout
     mail.close()
     mail.logout()
-
     return last_email_id
 
+def fetch_emails_since_last_parsed(email_address, password, last_parsed_email_id):
+    mail = imaplib.IMAP4_SSL('imap.gmail.com')
+    mail.login(email_address, password)
+    mail.select('inbox')
+    status, email_ids = mail.search(None, 'ALL')
+    if status != 'OK':
+        print("No emails found!")
+        return []
 
-def check_and_parse_new_email(email_address, email_password, client, db_name='mydatabase', status_collection='status',
-                              orders_collection='orders'):
-    latest_email_id = get_latest_email_id(email_address, email_password)
+    all_email_ids = email_ids[0].split()
+    last_parsed_index = all_email_ids.index(last_parsed_email_id.encode()) if last_parsed_email_id in all_email_ids else 0
+    new_email_ids = all_email_ids[last_parsed_index + 1:]
+
+    emails = []
+    for e_id in new_email_ids:
+        status, email_data = mail.fetch(e_id, '(RFC822)')
+        if status == 'OK':
+            emails.append(email_data[0][1])
+
+    mail.close()
+    mail.logout()
+    return emails
+
+def check_and_parse_new_emails(email_address, email_password, client, db_name='mydatabase', status_collection='status', orders_collection='orders'):
     last_parsed_email_id = get_last_parsed_email_id(client, db_name, status_collection)
+    latest_email_id = get_latest_email_id(email_address, email_password)
 
+    # Return None if the latest email is the last parsed email
     if latest_email_id == last_parsed_email_id:
-        print("Latest email has already been parsed.")
-        return
-    else:
-        # Fetch and parse the latest email
-        raw_email_content, email_id = fetch_last_email_content(email_address, email_password)
-        parsed_data = parse_email(raw_email_content, email_id)
+        print("Latest email has already been parsed. No new emails to process.")
+        return None
 
-        # Insert parsed data into MongoDB
-        insert_order_into_mongodb(parsed_data, client, db_name, orders_collection)
+    new_emails = fetch_emails_since_last_parsed(email_address, email_password, last_parsed_email_id)
 
-        # Update the last parsed email ID in the status collection
+    for raw_email in new_emails:
+        email_message = email_lib.message_from_bytes(raw_email)
+        subject = str(email_lib.header.make_header(email_lib.header.decode_header(email_message['Subject'])))
+
+        if 'Concord Peet\'s Route Replenishment Submission' in subject:
+            parsed_data = parse_email(raw_email, email_message['Message-ID'])
+            if parsed_data is not None:
+                insert_order_into_mongodb(parsed_data, client, db_name, orders_collection)
+
+    # Update the last parsed email ID in the database
+    if new_emails:
         db = client[db_name]
         collection = db[status_collection]
         collection.update_one({'variable': 'last_parsed'}, {'$set': {'value': latest_email_id}}, upsert=True)
-        client.close()
-
 
 # Example usage
-# check_and_parse_new_email('your_email@gmail.com', 'your_password')
+# client = MongoClient('mongodb://localhost:27017/')  # or your MongoDB connection details
+# check_and_parse_new_emails('your_email@gmail.com', 'your_password', client)
 
-import imaplib
-from tabula import read_pdf
-from io import BytesIO
-
-
-
-def fetch_and_parse_pdf_from_email(email_address, password, mail_server='imap.gmail.com'):
-    mail = imaplib.IMAP4_SSL(mail_server)
-    mail.login(email_address, password)
-    mail.select('inbox')
-
-    status, response = mail.search(None, '(SUBJECT "IS")')
-    if status != 'OK':
-        print("No emails with the specified subject and attachments found.")
-        return
-
-    for e_id in reversed(response[0].split()):
-        status, data = mail.fetch(e_id, '(RFC822)')
-        if status != 'OK':
-            continue
-
-        msg = email_lib.message_from_bytes(data[0][1])
-
-        for part in msg.walk():
-            if part.get_content_maintype() == 'multipart' or part.get('Content-Disposition') is None:
-                continue
-
-            filename = part.get_filename()
-            if filename and filename.endswith('.pdf'):
-                pdf_bytes = part.get_payload(decode=True)
-                print(f"PDF found, parsing in memory...")
-
-                # Use tabula-py to read the PDF from bytes
-                dfs = read_pdf(BytesIO(pdf_bytes), pages='all', multiple_tables=True, stream=True)
-
-                if dfs:
-                    print(f"Found {len(dfs)} tables.")
-                    # Here you can process your data frames (dfs) and save them to MongoDB
-                    # For simplicity, we're just printing the first table
-                    if len(dfs) > 0:
-                        print(dfs[0])
-                        # save_inventory_data_to_mongodb(dfs[0])  # Implement this function based on your needs
-                else:
-                    print("No tables found in the PDF.")
-                break  # Assuming one PDF per email of interest, break after processing
-
-    mail.logout()
-
-
-def save_inventory_data_to_mongodb(df, db_name='mydatabase', collection_name='inventory'):
-    uri = "mongodb+srv://gjtat901:koxbi2-kijbas-qoQzad@cluster0.abxr6po.mongodb.net/?retryWrites=true&w=majority"
-    client = MongoClient(uri)
-    db = client[db_name]
-    collection = db[collection_name]
-
-    # Convert DataFrame to dictionary and insert into MongoDB
-    data_dict = df.to_dict("records")  # Converts DataFrame to list of dictionaries
-    if data_dict:
-        collection.insert_many(data_dict)
-        print(f"Inserted {len(data_dict)} records into MongoDB.")
-    else:
-        print("No data to insert.")
-
-    client.close()
-
-# Example usage
 
 if __name__ == '__main__':
     email = "GJTat901@gmail.com"
@@ -329,5 +277,4 @@ if __name__ == '__main__':
     uri = "mongodb+srv://gjtat901:koxbi2-kijbas-qoQzad@cluster0.abxr6po.mongodb.net/?retryWrites=true&w=majority"
     client = MongoClient(uri)
 
-    fetch_and_parse_pdf_from_email(email, password)
-    # check_and_parse_new_email(email, password, client)
+    check_and_parse_new_emails(email, password, client)
