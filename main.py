@@ -47,7 +47,7 @@ def fetch_last_email_content(email_address, password):
 # Example usage
 # email_content = fetch_last_email_content('your_email@gmail.com', 'your_password')
 
-def parse_email(raw_email_content, email_id):
+def parse_email(raw_email_content):
     """
     Parses the raw content of an email, handles forwarded emails, and extracts specific data points and order details.
 
@@ -71,7 +71,6 @@ def parse_email(raw_email_content, email_id):
         'Order Details': [],
         'Email ID': email_id
     }
-
 
     def decode_payload(payload, charset='utf-8'):
         try:
@@ -163,10 +162,11 @@ def parse_email(raw_email_content, email_id):
 # parsed_data = parse_email(raw_email_content)
 
 
-def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orders_collection='orders'):
+def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orders_collection='orders', status_collection='status'):
     """
     Inserts the order details into a MongoDB collection, organized by date and route.
 
+    :param status_collection:
     :param extracted_data: The data to be inserted, including the order details.
     :param db_name: The name of the database.
     :param orders_collection: The name of the collection for orders.
@@ -186,12 +186,17 @@ def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orde
         'email_id': extracted_data['Email ID'],
         'date': datetime.strptime(extracted_data['Pick up Date'], "%m/%d/%Y"),  # Adjust date format if necessary
         'route': extracted_data['Route Number'],
-        'orders': extracted_data['Order Details']
+        'orders': extracted_data['Order Details'],
+        'status': "Received",
     }
 
     # Insert the document into the collection
     result = collection.insert_one(order_document)
     print(f"Order data inserted with record id: {result.inserted_id}")
+
+    db = client[db_name]
+    collection = db[status_collection]
+    collection.update_one({'variable': 'last_parsed'}, {'$set': {'value': extracted_data['Email ID']}}, upsert=True)
 
 
 # Example usage
@@ -203,6 +208,7 @@ def get_last_parsed_email_id(client, db_name='mydatabase', status_collection='st
     status_document = collection.find_one({'variable': 'last_parsed'})
     last_parsed_email_id = status_document.get('value') if status_document else None
     return last_parsed_email_id
+
 
 def get_latest_email_id(email_address, password):
     mail = imaplib.IMAP4_SSL('imap.gmail.com')
@@ -217,54 +223,51 @@ def get_latest_email_id(email_address, password):
     mail.logout()
     return last_email_id
 
-def fetch_emails_since_last_parsed(email_address, password, last_parsed_email_id):
+
+def fetch_unread_emails(email_address, password):
+    """
+    Fetches unread emails from the Gmail account.
+    """
     mail = imaplib.IMAP4_SSL('imap.gmail.com')
     mail.login(email_address, password)
     mail.select('inbox')
-    status, email_ids = mail.search(None, 'ALL')
-    if status != 'OK':
-        print("No emails found!")
+
+    # Search for unread emails
+    result, data = mail.search(None, 'UNSEEN')
+    if result != 'OK':
+        print("Failed to retrieve unread emails.")
         return []
 
-    all_email_ids = email_ids[0].split()
-    last_parsed_index = all_email_ids.index(last_parsed_email_id.encode()) if last_parsed_email_id in all_email_ids else 0
-    new_email_ids = all_email_ids[last_parsed_index + 1:]
+    if data is None:
+        print("All orders parsed")
 
+    email_ids = data[0].split()
     emails = []
-    for e_id in new_email_ids:
-        status, email_data = mail.fetch(e_id, '(RFC822)')
-        if status == 'OK':
+
+    for e_id in email_ids:
+        result, email_data = mail.fetch(e_id, '(RFC822)')
+        if result == 'OK':
             emails.append(email_data[0][1])
 
     mail.close()
     mail.logout()
     return emails
 
-def check_and_parse_new_emails(email_address, email_password, client, db_name='mydatabase', status_collection='status', orders_collection='orders'):
-    last_parsed_email_id = get_last_parsed_email_id(client, db_name, status_collection)
-    latest_email_id = get_latest_email_id(email_address, email_password)
+def check_and_parse_new_emails(email_address, email_password, client, db_name='mydatabase', orders_collection='orders'):
+    """
+    Fetches unread emails, parses them, and inserts order details into MongoDB.
+    """
+    unread_emails = fetch_unread_emails(email_address, email_password)
 
-    # Return None if the latest email is the last parsed email
-    if latest_email_id == last_parsed_email_id:
-        print("Latest email has already been parsed. No new emails to process.")
-        return None
-
-    new_emails = fetch_emails_since_last_parsed(email_address, email_password, last_parsed_email_id)
-
-    for raw_email in new_emails:
+    for raw_email in unread_emails:
         email_message = email_lib.message_from_bytes(raw_email)
         subject = str(email_lib.header.make_header(email_lib.header.decode_header(email_message['Subject'])))
 
         if 'Concord Peet\'s Route Replenishment Submission' in subject:
-            parsed_data = parse_email(raw_email, email_message['Message-ID'])
+            parsed_data = parse_email(raw_email)
             if parsed_data is not None:
                 insert_order_into_mongodb(parsed_data, client, db_name, orders_collection)
 
-    # Update the last parsed email ID in the database
-    if new_emails:
-        db = client[db_name]
-        collection = db[status_collection]
-        collection.update_one({'variable': 'last_parsed'}, {'$set': {'value': latest_email_id}}, upsert=True)
 
 # Example usage
 # client = MongoClient('mongodb://localhost:27017/')  # or your MongoDB connection details
@@ -277,4 +280,4 @@ if __name__ == '__main__':
     uri = "mongodb+srv://gjtat901:koxbi2-kijbas-qoQzad@cluster0.abxr6po.mongodb.net/?retryWrites=true&w=majority"
     client = MongoClient(uri)
 
-    check_and_parse_new_emails(email, password, client)
+    check_and_parse_new_emails(email, password, client, 'mydatabase', 'orders')
