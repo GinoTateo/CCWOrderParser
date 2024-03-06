@@ -54,6 +54,7 @@ def parse_email_content(email_content):
 
     # Initial structure for extracted data
     extracted_data = {
+        'email_id': msg.get('Message-ID'),  # Extract email ID
         'route_name': None,
         'route': None,
         'pick_up_date': None,
@@ -63,53 +64,87 @@ def parse_email_content(email_content):
         'additional_items_needed': None,
     }
 
-    # Helper function to parse HTML and extract table data, skipping the header row
+    # Function to extract text content and handle forwarded emails
+    def handle_forwarded_emails(text_content):
+        forwarded_patterns = [
+            "Forwarded message", "Begin forwarded message", "^From:", "^Sent:",
+            "^To:", "Original Message", "^\-\- Forwarded message \-\-$"
+        ]
+        for pattern in forwarded_patterns:
+            if re.search(pattern, text_content, re.IGNORECASE):
+                # Find the start of the original message and return the substring
+                start = re.search(pattern, text_content, re.IGNORECASE).start()
+                return text_content[start:]
+        return text_content
+
+    # Function to extract details from text content
+    def extract_order_details(html_body):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_body, 'html.parser')
+        text = soup.get_text(separator=' ')  # Use space as separator to prevent concatenation of words
+
+        details_patterns = {
+            'route_name': r"Route Name:\s*([^\n]+)",
+            'route': r"Route Number:\s*([^\n]+)",
+            'pick_up_date': r"Pick up Date:\s*([^\n]+)",
+            'pick_up_time': r"Pick up Time:\s*([^\n]+)",
+            'total_cases': r"Total Cases:\s*(\d+)",
+            # Assuming 'Additional Items Needed' might not always be followed by identifiable content
+            'additional_items_needed': r"Additional Items Needed:\s*([^\n]*)",
+        }
+
+        for key, pattern in details_patterns.items():
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                extracted_data[key] = match.group(1).strip()
+
+        # Parse 'pick_up_date' specifically if present
+        if extracted_data['pick_up_date']:
+            try:
+                extracted_data['pick_up_date'] = datetime.strptime(extracted_data['pick_up_date'], "%m/%d/%Y").date()
+            except ValueError as e:
+                print(f"Error parsing pick_up_date: {e}")
+                extracted_data['pick_up_date'] = None
+
+    # Function to parse HTML and extract table data
     def extract_table_from_html(html_body):
         soup = BeautifulSoup(html_body, 'html.parser')
         table = soup.find('table')
         if table:
             rows = table.find_all('tr')
-            for row in rows[1:]:  # Skip the first row (header) using [1:]
+            for row in rows[1:]:  # Assuming the first row is headers
                 cols = row.find_all('td')
-                if cols:
-                    extracted_data['items'].append([col.text.strip() for col in cols])
+                item = [col.text.strip() for col in cols]
+                extracted_data['items'].append(item)
 
-    # Function to extract additional order details from the email content
-    def extract_order_details(html_body):
-        soup = BeautifulSoup(html_body, 'html.parser')
-
-        # Patterns for each piece of order detail, adjust as necessary
-        details_patterns = {
-            'route_name': "Route Name",
-            'route': "Route Number",
-            'pick_up_date': "Pick up Date",
-            'pick_up_time': "Pick up Time",
-            'total_cases': "Total Cases",
-            'additional_items_needed': "Additional Items Needed",
-        }
-
-        for key, label in details_patterns.items():
-            pattern = re.compile(f"{label}:?\\s*(.*)", re.IGNORECASE)
-            result = soup.find(string=pattern)
-            if result:
-                match = pattern.search(result)
-                if match:
-                    extracted_data[key] = match.group(1).strip()
-
-    # Determine whether the email content is multipart and extract accordingly
+    # Extract content and apply parsing logic
     if msg.is_multipart():
         for part in msg.walk():
-            content_type = part.get_content_type()
-            if content_type == "text/html":
-                html_content = part.get_content()
+            part_type = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            charset = part.get_content_charset('utf-8')
+            if part_type == "text/plain":
+                text_content = payload.decode(charset)
+                text_content = handle_forwarded_emails(text_content)
+                extract_order_details(text_content)
+            elif part_type == "text/html":
+                html_content = payload.decode(charset)
                 extract_table_from_html(html_content)
-                extract_order_details(html_content)  # Extract additional details
-                break
+                html_text_content = BeautifulSoup(html_content, 'html.parser').get_text()
+                extract_order_details(html_text_content)
     else:
-        if msg.get_content_type() == "text/html":
-            html_content = msg.get_content()
+        content_type = msg.get_content_type()
+        payload = msg.get_payload(decode=True)
+        charset = msg.get_content_charset('utf-8')
+        if content_type == "text/plain":
+            text_content = payload.decode(charset)
+            text_content = handle_forwarded_emails(text_content)
+            extract_order_details(text_content)
+        elif content_type == "text/html":
+            html_content = payload.decode(charset)
             extract_table_from_html(html_content)
-            extract_order_details(html_content)  # Extract additional details
+            html_text_content = BeautifulSoup(html_content, 'html.parser').get_text()
+            extract_order_details(html_text_content)
 
     return extracted_data
 
@@ -134,7 +169,7 @@ def insert_order_into_mongodb(extracted_data, client, db_name='mydatabase', orde
 
     # Prepare the document to be inserted
     try:
-        pick_up_date = datetime.strptime(extracted_data['pick_up_date'], "%Y-%m-%d") if extracted_data.get('pick_up_date') else None
+        pick_up_date = datetime.today()
     except ValueError as e:
         print(f"Error parsing pick_up_date: {e}")
         pick_up_date = None
