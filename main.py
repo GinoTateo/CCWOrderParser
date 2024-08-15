@@ -279,9 +279,9 @@ def check_and_parse_new_emails(email_address, email_password, client, db_name='m
 
 
 if __name__ == '__main__':
-    email = "GJTat901@gmail.com"
-    password = "xnva kbzm flsa szzo"
-    uri = "mongodb+srv://gjtat901:koxbi2-kijbas-qoQzad@cluster0.abxr6po.mongodb.net/?retryWrites=true&w=majority"
+    email = ""
+    password = ""
+    uri = ""
     client = MongoClient(uri)
 
     check_and_parse_new_emails(email, password, client, 'mydatabase', 'orders')
